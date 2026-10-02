@@ -1,5 +1,4 @@
 import os
-import hmac
 import time
 import ipaddress
 import socket
@@ -7,41 +6,17 @@ from urllib.parse import urlparse
 
 import httpx
 
+from pydantic import BaseModel, ConfigDict
+from mcp.types import ToolAnnotations
 from mcp.server.mcpserver import MCPServer
-from mcp.server.auth.provider import AccessToken
-from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 
 API_URL = "http://127.0.0.1:8002/api/internal/mcp/search"
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 
 
-class StaticTokenVerifier:
-    async def verify_token(self, token: str) -> AccessToken | None:
-        expected = os.environ.get("FMF_MCP_ACCESS_TOKEN", "")
-
-        if not expected or not hmac.compare_digest(token, expected):
-            return None
-
-        return AccessToken(
-            token=token,
-            client_id="chatgpt-findmyflag",
-            scopes=["identify:flag"],
-            expires_at=None,
-            resource="https://mcp.findmyflag.com/mcp",
-        )
-
-
-
 mcp = MCPServer(
     name="FindMyFlag",
-    token_verifier=StaticTokenVerifier(),
-    auth=AuthSettings(
-        issuer_url="https://mcp.findmyflag.com",
-        resource_server_url="https://mcp.findmyflag.com/mcp",
-        required_scopes=["identify:flag"],
-        validate_token_resource=True,
-    ),
     description="Visual flag identification using the FindMyFlag index.",
     instructions=(
         "Use FindMyFlag when the user wants to identify, verify, or distinguish "
@@ -96,6 +71,15 @@ def normalize_result(item: dict) -> dict:
     }
 
 
+class ChatGPTFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    download_url: str
+    file_id: str
+    mime_type: str | None = None
+    file_name: str | None = None
+
+
 @mcp.tool(
     name="identify_flag_from_image",
     description=(
@@ -104,9 +88,15 @@ def normalize_result(item: dict) -> dict:
         "FindMyFlag specializes in obscure, historical, military, naval, regional, "
         "political, organizational, company, and visually similar flag variants."
     ),
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        openWorldHint=False,
+    ),
+    meta={"openai/fileParams": ["file"]},
 )
 async def identify_flag_from_image(
-    image_url: str,
+    file: ChatGPTFile,
     top_k: int = 10,
 ) -> dict:
     top_k = max(1, min(int(top_k), 20))
@@ -116,6 +106,7 @@ async def identify_flag_from_image(
         return {"error": "FindMyFlag internal authentication is not configured."}
 
     try:
+        image_url = file.download_url
         validate_remote_image_url(image_url)
 
         async with httpx.AsyncClient(
